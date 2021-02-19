@@ -192,7 +192,7 @@ static const struct stm32h7x_part_info stm32h7x_parts[] = {
 	.block_size			= 16,
 	.max_flash_size_kb	= 2048,
 	.max_bank_size_kb	= 1024,
-	.has_dual_bank		= true,
+	.has_dual_bank		= false,
 	.fsize_addr			= 0x08FFF80C,
 	.wps_group_size		= 4,
 	.wps_mask			= 0xFFFFFFFF,
@@ -218,6 +218,22 @@ static const struct stm32h7x_part_info stm32h7x_parts[] = {
 /* flash bank stm32x <base> <size> 0 0 <target#> */
 
 FLASH_BANK_COMMAND_HANDLER(stm32x_flash_bank_command)
+{
+	struct stm32h7x_flash_bank *stm32x_info;
+
+	if (CMD_ARGC < 6)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	stm32x_info = malloc(sizeof(struct stm32h7x_flash_bank));
+	bank->driver_priv = stm32x_info;
+
+	stm32x_info->probed = false;
+	stm32x_info->user_bank_size = bank->size;
+
+	return ERROR_OK;
+}
+
+FLASH_BANK_COMMAND_HANDLER(stm32x_flash_bank_command1)
 {
 	struct stm32h7x_flash_bank *stm32x_info;
 
@@ -667,10 +683,13 @@ static int stm32x_write_block(struct flash_bank *bank, const uint8_t *buffer,
 static int stm32x_write(struct flash_bank *bank, const uint8_t *buffer,
 		uint32_t offset, uint32_t count)
 {
+	
 	struct target *target = bank->target;
 	struct stm32h7x_flash_bank *stm32x_info = bank->driver_priv;
 	uint32_t address = bank->base + offset;
 	int retval, retval2;
+
+	printf("Write request on:%lX %i\n", (size_t)address, count);
 
 	if (bank->target->state != TARGET_HALTED) {
 		LOG_ERROR("Target not halted");
@@ -794,18 +813,20 @@ static int stm32x_probe(struct flash_bank *bank)
 
 	/* get flash size from target */
 	retval = target_read_u16(target, stm32x_info->part_info->fsize_addr, &flash_size_in_kb);
+	flash_size_in_kb = 256;
 	if (retval != ERROR_OK) {
 		/* read error when device has invalid value, set max flash size */
 		flash_size_in_kb = stm32x_info->part_info->max_flash_size_kb;
 	} else
 		LOG_INFO("flash size probed value %" PRIu16, flash_size_in_kb);
 
-
+	flash_size_in_kb = 512;
 
 
 	/* setup bank size */
+	const uint32_t bank2offset = 0x400;
 	const uint32_t bank1_base = FLASH_BANK0_ADDRESS;
-	const uint32_t bank2_base = bank1_base + stm32x_info->part_info->max_bank_size_kb * 1024;
+	const uint32_t bank2_base = bank1_base + bank2offset * 1024; //stm32x_info->part_info->max_bank_size_kb * 1024;
 	bool has_dual_bank = stm32x_info->part_info->has_dual_bank;
 
 	switch (device_id) {
@@ -900,6 +921,45 @@ static int stm32x_probe(struct flash_bank *bank)
 		LOG_ERROR("failed to allocate bank prot_block");
 		return ERROR_FAIL;
 	}
+
+	// Add the 0x8100000 bank
+	struct flash_bank *info = calloc(sizeof(struct flash_bank), 1);
+	if (NULL == info)
+		return ERROR_FAIL;
+
+	/* Create a name for the info bank, append "_1" to main name */
+	char *name = malloc(strlen(bank->name) + 3);
+	strcpy(name, bank->name);
+	strcat(name, "_1");
+
+	/* Initialize info bank */
+	info->name = name;
+	info->target = bank->target;
+	info->driver = bank->driver;
+
+	struct stm32h7x_flash_bank *stm32x_info_1;
+	stm32x_info_1 = malloc(sizeof(struct stm32h7x_flash_bank));
+	info->driver_priv = stm32x_info_1;
+	stm32x_info_1->probed = true;
+	stm32x_info_1->user_bank_size = bank->size;
+	stm32x_info_1->flash_regs_base = FLASH_REG_BASE_B1;
+	stm32x_info_1->part_info = stm32x_info->part_info;
+
+	info->base = FLASH_BANK1_ADDRESS;
+	info->size = 256 * 1024;
+	info->sectors = alloc_block_array(0, stm32x_info->part_info->page_size_kb * 1024, bank->num_sectors);
+	info->num_sectors = bank->num_sectors;
+	info->prot_blocks = alloc_block_array(0, stm32x_info->part_info->page_size_kb * wpsn * 1024,
+			bank->num_prot_blocks);
+	info->num_prot_blocks = bank->num_prot_blocks;
+	flash_bank_add(info);
+
+	while (bank->next) {
+		bank = bank->next;
+	}
+	LOG_INFO("Bank (%u) size is %" PRIu16 " kb, base address is  " TARGET_ADDR_FMT,
+		bank->bank_number, flash_size_in_kb, bank->base);
+	printf("Size: %i %i", bank->size, bank->num_sectors);
 
 	stm32x_info->probed = true;
 	return ERROR_OK;
@@ -1127,6 +1187,7 @@ COMMAND_HANDLER(stm32x_handle_option_read_command)
 
 COMMAND_HANDLER(stm32x_handle_option_write_command)
 {
+	printf("Handling write command on bank 0\n");
 	if (CMD_ARGC < 3) {
 		command_print(CMD, "stm32h7x option_write <bank> <option_reg offset> <value> [mask]");
 		return ERROR_COMMAND_SYNTAX_ERROR;
@@ -1201,6 +1262,22 @@ const struct flash_driver stm32h7x_flash = {
 	.name = "stm32h7x",
 	.commands = stm32x_command_handlers,
 	.flash_bank_command = stm32x_flash_bank_command,
+	.erase = stm32x_erase,
+	.protect = stm32x_protect,
+	.write = stm32x_write,
+	.read = default_flash_read,
+	.probe = stm32x_probe,
+	.auto_probe = stm32x_auto_probe,
+	.erase_check = default_flash_blank_check,
+	.protect_check = stm32x_protect_check,
+	.info = stm32x_get_info,
+	.free_driver_priv = default_flash_free_driver_priv,
+};
+
+const struct flash_driver stm32h7x_flash1 = {
+	.name = "stm32h7x_1",
+	.commands = stm32x_command_handlers,
+	.flash_bank_command = stm32x_flash_bank_command1,
 	.erase = stm32x_erase,
 	.protect = stm32x_protect,
 	.write = stm32x_write,

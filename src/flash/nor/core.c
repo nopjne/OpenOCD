@@ -156,6 +156,17 @@ int default_flash_verify(struct flash_bank *bank,
 	uint32_t target_crc, image_crc;
 	int retval;
 
+	retval = image_calculate_checksum(buffer, 128*1024, &image_crc);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = target_checksum_memory(bank->target, offset + bank->base, 128*1024, &target_crc);
+	if (retval != ERROR_OK)
+		return retval;
+
+	LOG_DEBUG("128K addr " TARGET_ADDR_FMT ", len 0x%08" PRIx32 ", crc 0x%08" PRIx32 " 0x%08" PRIx32,
+		offset + bank->base, count, ~image_crc, ~target_crc);
+
 	retval = image_calculate_checksum(buffer, count, &image_crc);
 	if (retval != ERROR_OK)
 		return retval;
@@ -472,6 +483,7 @@ static int flash_iterate_address_range_inner(struct target *target,
 
 	if (c->size == 0 || c->num_sectors == 0) {
 		LOG_ERROR("Bank is invalid");
+		printf ("Invalid bank: %08X %i %i", (unsigned int)c->base, c->size, c->num_sectors);
 		return ERROR_FLASH_BANK_INVALID;
 	}
 
@@ -850,6 +862,7 @@ int flash_write_unlock_verify(struct target *target, struct image *image,
 			LOG_DEBUG("Truncate flash run size to the current flash chip.");
 
 			run_size = c->base + c->size - run_address;
+			printf("c->base: %08X %i %08X", (unsigned int)c->base, c->size, (unsigned int)run_address);
 			assert(run_size > 0);
 		}
 
